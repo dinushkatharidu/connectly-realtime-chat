@@ -5,6 +5,12 @@ import http from "http";
 import { Server } from "socket.io";
 import mongoose from "mongoose";
 
+import authRoutes from "./routes/auth.routes";
+import chatRoutes from "./routes/chat.routes";
+
+import { setupSocket } from "./config/socket";
+import { setIO } from "./config/io";
+
 dotenv.config();
 
 const app = express();
@@ -21,7 +27,10 @@ app.get("/", (_req, res) => {
   res.send("Connectly API is running ✅");
 });
 
-// ---- Create HTTP server (needed for Socket.IO) ----
+app.use("/api/auth", authRoutes);
+app.use("/api/chats", chatRoutes);
+
+// ---- Create HTTP server (Socket.IO attaches here) ----
 const server = http.createServer(app);
 
 // ---- Socket.IO server ----
@@ -32,15 +41,9 @@ const io = new Server(server, {
   },
 });
 
-io.on("connection", (socket) => {
-  console.log("✅ user connected:", socket.id);
+setIO(io); // ✅ make io accessible from controllers
+setupSocket(io); // ✅ define socket events
 
-  socket.on("disconnect", () => {
-    console.log("❌ user disconnected:", socket.id);
-  });
-});
-
-// ---- DB + start ----
 const PORT = process.env.PORT || 5000;
 
 async function start() {

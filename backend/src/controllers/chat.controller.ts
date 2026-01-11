@@ -5,6 +5,7 @@ import { z } from "zod";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { ChatModel } from "../models/Chat";
 import { MessageModel } from "../models/Message";
+import { getIO } from "../config/io";
 
 /* =====================================================
    Helpers
@@ -13,10 +14,6 @@ import { MessageModel } from "../models/Message";
 const toObjectId = (id: string) => new mongoose.Types.ObjectId(id);
 const isValidObjectId = (id: string) => mongoose.Types.ObjectId.isValid(id);
 
-/**
- * Some TS/Express setups type params as string | string[] | undefined.
- * This helper safely extracts a param as a string.
- */
 function getParamString(
   value: unknown
 ): { ok: true; value: string } | { ok: false; message: string } {
@@ -28,7 +25,6 @@ function getParamString(
     typeof value[0] === "string" &&
     value[0].trim().length > 0
   ) {
-    // If params accidentally come as array, take first value safely
     return { ok: true, value: value[0] };
   }
   return { ok: false, message: "Invalid or missing route parameter" };
@@ -51,10 +47,6 @@ const sendMessageSchema = z.object({
    Controllers
 ===================================================== */
 
-/**
- * POST /api/chats
- * Create or return existing 1-to-1 chat
- */
 export async function createChat(req: AuthRequest, res: Response) {
   try {
     if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
@@ -96,16 +88,11 @@ export async function createChat(req: AuthRequest, res: Response) {
   }
 }
 
-/**
- * GET /api/chats
- * List chats for logged-in user
- */
 export async function listMyChats(req: AuthRequest, res: Response) {
   try {
     if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
 
     const myIdStr = req.userId;
-
     if (!isValidObjectId(myIdStr)) {
       return res.status(400).json({ message: "Invalid user id" });
     }
@@ -122,10 +109,6 @@ export async function listMyChats(req: AuthRequest, res: Response) {
   }
 }
 
-/**
- * GET /api/chats/:chatId/messages
- * Get messages for a chat
- */
 export async function getMessages(req: AuthRequest, res: Response) {
   try {
     if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
@@ -163,7 +146,8 @@ export async function getMessages(req: AuthRequest, res: Response) {
 
 /**
  * POST /api/chats/message
- * Save a message to DB
+ * 1) Save message to DB
+ * 2) Emit new message to chat room in real-time
  */
 export async function sendMessage(req: AuthRequest, res: Response) {
   try {
@@ -198,6 +182,10 @@ export async function sendMessage(req: AuthRequest, res: Response) {
 
     chat.lastMessage = message._id;
     await chat.save();
+
+    // ✅ Emit real-time message to everyone in this chat room
+    const io = getIO();
+    io.to(chatIdStr).emit("new_message", message);
 
     return res.status(201).json(message);
   } catch (error) {
