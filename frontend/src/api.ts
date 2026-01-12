@@ -12,3 +12,7 @@ export function setAuthToken(token: string | null) {
     delete api.defaults.headers.common["Authorization"];
   }
 }
+
+// Initialize token if already stored
+const saved = localStorage.getItem("token");
+if (saved) setAuthToken(saved);

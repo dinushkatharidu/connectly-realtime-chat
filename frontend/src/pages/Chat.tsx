@@ -1,39 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, setAuthToken } from "../api";
+import { api } from "../api";
+import { useAuth } from "../context/AuthContext";
 import { createSocket } from "../socket";
-
-/* =======================
-   Types (NO any)
-======================= */
-
-type User = {
-  _id: string;
-  name: string;
-  email: string;
-};
-
-type Chat = {
-  _id: string;
-  members: User[];
-  lastMessage?: Message;
-};
-
-type Message = {
-  _id: string;
-  chatId: string;
-  senderId: string;
-  text: string;
-  createdAt: string;
-};
-
-/* =======================
-   Component
-======================= */
+import type { Chat, Message } from "../types";
 
 export default function ChatPage() {
-  const [token, setToken] = useState<string>(
-    localStorage.getItem("token") || ""
-  );
+  const { token, logout, user } = useAuth();
 
   const [chats, setChats] = useState<Chat[]>([]);
   const [chatId, setChatId] = useState<string>("");
@@ -41,53 +13,67 @@ export default function ChatPage() {
   const [text, setText] = useState<string>("");
 
   /* =======================
-     Socket
+     Socket instance
   ======================= */
-
   const socket = useMemo(() => {
     if (!token) return null;
     return createSocket(token);
   }, [token]);
 
   /* =======================
-     Auth token setup
+     Load chats (SAFE)
   ======================= */
-
   useEffect(() => {
-    if (!token) return;
-    setAuthToken(token);
-    localStorage.setItem("token", token);
-  }, [token]);
+    let active = true;
+
+    async function fetchChats() {
+      try {
+        const res = await api.get<Chat[]>("/api/chats");
+        if (active) setChats(res.data);
+      } catch (err) {
+        console.error("Failed to load chats", err);
+      }
+    }
+
+    fetchChats();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   /* =======================
-     API calls
+     Load messages
   ======================= */
-
-  async function loadChats() {
-    const res = await api.get<Chat[]>("/api/chats");
-    setChats(res.data);
-  }
-
   async function loadMessages(id: string) {
-    const res = await api.get<Message[]>(`/api/chats/${id}/messages`);
-    setMessages(res.data);
+    try {
+      const res = await api.get<Message[]>(`/api/chats/${id}/messages`);
+      setMessages(res.data);
+    } catch (err) {
+      console.error("Failed to load messages", err);
+    }
   }
 
+  /* =======================
+     Send message
+  ======================= */
   async function sendMessage() {
     if (!chatId || !text.trim()) return;
 
-    await api.post("/api/chats/message", {
-      chatId,
-      text,
-    });
-
-    setText("");
+    try {
+      await api.post("/api/chats/message", {
+        chatId,
+        text,
+      });
+      setText("");
+    } catch (err) {
+      console.error("Failed to send message", err);
+    }
   }
 
   /* =======================
      Socket listeners
   ======================= */
-
   useEffect(() => {
     if (!socket) return;
 
@@ -101,10 +87,6 @@ export default function ChatPage() {
       }
     });
 
-    socket.on("typing", (data: { userId: string; isTyping: boolean }) => {
-      console.log("typing:", data);
-    });
-
     return () => {
       socket.disconnect();
     };
@@ -113,7 +95,6 @@ export default function ChatPage() {
   /* =======================
      Join chat room
   ======================= */
-
   useEffect(() => {
     if (!socket || !chatId) return;
     socket.emit("join_chat", chatId);
@@ -122,30 +103,26 @@ export default function ChatPage() {
   /* =======================
      UI
   ======================= */
-
   return (
     <div style={{ padding: 16, fontFamily: "sans-serif" }}>
-      <h2>Connectly – Realtime Chat</h2>
-
-      {/* TOKEN INPUT (TEMP) */}
-      <div style={{ marginBottom: 12 }}>
-        <label>JWT Token</label>
-        <textarea
-          rows={3}
-          style={{ width: "100%" }}
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="Paste JWT token here"
-        />
-        <button onClick={loadChats} style={{ marginTop: 8 }}>
-          Load My Chats
-        </button>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          marginBottom: 12,
+        }}
+      >
+        <div>
+          <b>Logged in:</b> {user?.name} ({user?.email})
+        </div>
+        <button onClick={logout}>Logout</button>
       </div>
 
       <div style={{ display: "flex", gap: 16 }}>
-        {/* CHAT LIST */}
+        {/* Chat list */}
         <div style={{ width: 320 }}>
           <h3>Chats</h3>
+
           {chats.map((chat) => (
             <div
               key={chat._id}
@@ -162,7 +139,7 @@ export default function ChatPage() {
               }}
             >
               <div>
-                <b>Chat ID:</b> {chat._id}
+                <b>{chat._id}</b>
               </div>
               <div>
                 <i>{chat.lastMessage?.text || "No messages yet"}</i>
@@ -171,7 +148,7 @@ export default function ChatPage() {
           ))}
         </div>
 
-        {/* MESSAGE AREA */}
+        {/* Messages */}
         <div style={{ flex: 1 }}>
           <h3>Messages</h3>
 
@@ -199,8 +176,6 @@ export default function ChatPage() {
               onChange={(e) => setText(e.target.value)}
               placeholder="Type message..."
               style={{ flex: 1, padding: 8 }}
-              onFocus={() => socket?.emit("typing", { chatId, isTyping: true })}
-              onBlur={() => socket?.emit("typing", { chatId, isTyping: false })}
             />
             <button onClick={sendMessage}>Send</button>
           </div>
