@@ -4,10 +4,16 @@ export type User = {
   email: string;
 };
 
-export type Chat = {
+export type AuthUser = {
+  id: string;
+  name: string;
+  email: string;
+};
+
+export type UserLite = {
   _id: string;
-  members: { _id: string; name: string; email: string }[];
-  lastMessage?: Message;
+  name: string;
+  email: string;
 };
 
 export type Message = {
@@ -16,4 +22,10 @@ export type Message = {
   senderId: string;
   text: string;
   createdAt: string;
+};
+
+export type Chat = {
+  _id: string;
+  members: UserLite[];
+  lastMessage?: Message;
 };
