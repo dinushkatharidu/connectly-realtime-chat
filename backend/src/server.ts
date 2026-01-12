@@ -10,6 +10,8 @@ import chatRoutes from "./routes/chat.routes";
 
 import { setupSocket } from "./config/socket";
 import { setIO } from "./config/io";
+import userRoutes from "./routes/user.routes";
+
 
 dotenv.config();
 
@@ -22,6 +24,9 @@ app.use(
     credentials: true,
   })
 );
+
+app.use("/api/users", userRoutes);
+
 
 app.get("/", (_req, res) => {
   res.send("Connectly API is running ✅");
