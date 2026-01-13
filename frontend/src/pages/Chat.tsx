@@ -9,6 +9,21 @@ function formatTime(iso: string) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function dayLabel(iso: string) {
+  const d = new Date(iso);
+  const today = new Date();
+  const same =
+    d.getFullYear() === today.getFullYear() &&
+    d.getMonth() === today.getMonth() &&
+    d.getDate() === today.getDate();
+  if (same) return "Today";
+  return d.toLocaleDateString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export default function ChatPage() {
   const { token, logout, user } = useAuth();
 
@@ -17,24 +32,28 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState<string>("");
 
-  // presence
+  // Presence
   const [onlineIds, setOnlineIds] = useState<Set<string>>(() => new Set());
 
-  // new chat search
-  const [searchEmail, setSearchEmail] = useState<string>("");
+  // New chat search
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchEmail, setSearchEmail] = useState("");
   const [searchResults, setSearchResults] = useState<UserLite[]>([]);
   const [searchError, setSearchError] = useState<string | null>(null);
 
-  // typing indicator
+  // Typing indicator
   const [typingUserIds, setTypingUserIds] = useState<Set<string>>(
     () => new Set()
   );
-
   const typingTimeoutRef = useRef<number | null>(null);
+
+  // Scroll
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
+  // ✅ Create ONE socket per token (stable)
   const socket = useMemo(() => {
     if (!token) return null;
+    // include websocket transport to reduce polling issues
     return createSocket(token);
   }, [token]);
 
@@ -57,15 +76,29 @@ export default function ChatPage() {
     setMessages(res.data);
   }, []);
 
+  // ✅ FIX: send message and instantly show in UI using response
   const sendMessage = useCallback(async () => {
     if (!activeChatId || !text.trim()) return;
-    await api.post("/api/chats/message", {
-      chatId: activeChatId,
-      text: text.trim(),
-    });
-    setText("");
-    socket?.emit("typing", { chatId: activeChatId, isTyping: false });
-  }, [activeChatId, text, socket]);
+
+    try {
+      const res = await api.post<Message>("/api/chats/message", {
+        chatId: activeChatId,
+        text: text.trim(),
+      });
+
+      // ✅ show immediately (no refresh needed)
+      setMessages((prev) => [...prev, res.data]);
+      setText("");
+
+      // update chats list preview (last message)
+      refreshChats().catch(() => {});
+
+      // stop typing
+      socket?.emit("typing", { chatId: activeChatId, isTyping: false });
+    } catch (e) {
+      console.error("sendMessage failed", e);
+    }
+  }, [activeChatId, text, refreshChats, socket]);
 
   const searchUsers = useCallback(async () => {
     setSearchError(null);
@@ -73,7 +106,7 @@ export default function ChatPage() {
 
     const q = searchEmail.trim();
     if (!q) {
-      setSearchError("Type an email (or part of email) to search");
+      setSearchError("Type an email (or part of email)");
       return;
     }
 
@@ -97,62 +130,73 @@ export default function ChatPage() {
       setActiveChatId(newChat._id);
       await loadMessages(newChat._id);
 
+      // join + mark seen
       socket?.emit("join_chat", newChat._id);
       socket?.emit("chat:seen", { chatId: newChat._id });
 
-      setSearchResults([]);
       setSearchEmail("");
+      setSearchResults([]);
       setSearchError(null);
+      setSearchOpen(false);
     },
     [refreshChats, loadMessages, socket]
   );
 
-  // Initial chats
+  // Initial load chats
   useEffect(() => {
-    let active = true;
+    let alive = true;
+
     async function init() {
       try {
         const res = await api.get<Chat[]>("/api/chats");
-        if (!active) return;
+        if (!alive) return;
         setChats(res.data);
         if (res.data.length > 0) setActiveChatId(res.data[0]._id);
       } catch (e) {
         console.error(e);
       }
     }
+
     init();
     return () => {
-      active = false;
+      alive = false;
     };
   }, []);
 
-  // On active chat change: load + join + mark seen
+  // When active chat changes: load messages + join room + mark seen
   useEffect(() => {
     if (!activeChatId) return;
 
-    let active = true;
+    let alive = true;
+
     async function onChatChange() {
-      if (!active) return;
+      if (!alive) return;
+
       setTypingUserIds(new Set());
       await loadMessages(activeChatId);
+
+      // ✅ always join room for realtime
       socket?.emit("join_chat", activeChatId);
+
+      // ✅ mark seen when opening chat
       socket?.emit("chat:seen", { chatId: activeChatId });
     }
+
     onChatChange();
+
     return () => {
-      active = false;
+      alive = false;
     };
   }, [activeChatId, loadMessages, socket]);
 
-  // Socket listeners (presence + messages + typing + seen)
+  // ✅ SOCKET LISTENERS (IMPORTANT: DO NOT disconnect on cleanup)
   useEffect(() => {
     if (!socket) return;
 
-    const onPresence = (ids: string[]) => {
-      setOnlineIds(new Set(ids));
-    };
+    const onPresence = (ids: string[]) => setOnlineIds(new Set(ids));
 
     const onNewMessage = (msg: Message) => {
+      // other user's message arrives here
       if (msg.chatId === activeChatId) {
         setMessages((prev) => [...prev, msg]);
         socket.emit("chat:seen", { chatId: activeChatId });
@@ -170,35 +214,28 @@ export default function ChatPage() {
       });
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const onSeen = (_data: { chatId: string; userId: string }) => {
-      // For now we just refresh chats/messages to reflect seenBy updates if needed
-      // (simple approach)
-      refreshChats().catch(() => {});
-    };
-
     socket.on("presence:list", onPresence);
     socket.on("new_message", onNewMessage);
     socket.on("typing", onTyping);
-    socket.on("chat:seen", onSeen);
 
     return () => {
       socket.off("presence:list", onPresence);
       socket.off("new_message", onNewMessage);
       socket.off("typing", onTyping);
-      socket.off("chat:seen", onSeen);
-      socket.disconnect();
+      // ❌ DO NOT socket.disconnect() here
     };
   }, [socket, activeChatId, refreshChats, user?.id]);
 
-  // Scroll
+  // Auto scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Typing debounce emit
   const handleTextChange = useCallback(
     (v: string) => {
       setText(v);
+
       if (!socket || !activeChatId) return;
 
       socket.emit("typing", { chatId: activeChatId, isTyping: true });
@@ -216,233 +253,282 @@ export default function ChatPage() {
   const partner = activeChat ? getPartner(activeChat) : null;
   const partnerOnline = partner ? onlineIds.has(partner._id) : false;
 
+  // group messages by date
+  const grouped: Array<{ label: string; items: Message[] }> = [];
+  for (const m of messages) {
+    const label = dayLabel(m.createdAt);
+    const last = grouped[grouped.length - 1];
+    if (!last || last.label !== label) grouped.push({ label, items: [m] });
+    else last.items.push(m);
+  }
+
   return (
-    <div style={{ padding: 16, fontFamily: "sans-serif" }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 12,
-        }}
-      >
-        <div>
-          <b>Logged in:</b> {user?.name} ({user?.email})
-        </div>
-        <button onClick={logout}>Logout</button>
-      </div>
-
-      <div
-        style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 16 }}
-      >
-        {/* Sidebar */}
-        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-          <h3 style={{ marginTop: 0 }}>Chats</h3>
-
-          <button onClick={() => refreshChats()} style={{ marginBottom: 10 }}>
-            Refresh
-          </button>
-
-          {/* New Chat */}
-          <div
-            style={{
-              borderTop: "1px solid #eee",
-              paddingTop: 10,
-              marginTop: 10,
-            }}
-          >
-            <h4 style={{ margin: "6px 0" }}>Start New Chat</h4>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
-                value={searchEmail}
-                onChange={(e) => setSearchEmail(e.target.value)}
-                placeholder="Search by email..."
-                style={{ flex: 1, padding: 8 }}
-              />
-              <button onClick={() => searchUsers()}>Search</button>
+    <div className="h-screen bg-slate-100">
+      <div className="mx-auto h-full max-w-6xl p-3 md:p-4">
+        <div className="h-full overflow-hidden rounded-2xl bg-white shadow-lg">
+          {/* top bar */}
+          <div className="flex items-center justify-between border-b px-4 py-3">
+            <div className="flex items-center gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-full bg-emerald-600 text-white font-semibold">
+                {user?.name?.slice(0, 1)?.toUpperCase() || "U"}
+              </div>
+              <div className="leading-tight">
+                <div className="font-semibold text-slate-900">{user?.name}</div>
+                <div className="text-xs text-slate-500">{user?.email}</div>
+              </div>
             </div>
 
-            {searchError && (
-              <div style={{ color: "crimson", marginTop: 6 }}>
-                {searchError}
-              </div>
-            )}
-
-            {searchResults.length > 0 && (
-              <div style={{ marginTop: 8 }}>
-                {searchResults.map((u) => (
-                  <div
-                    key={u._id}
-                    style={{
-                      border: "1px solid #eee",
-                      borderRadius: 8,
-                      padding: 10,
-                      marginBottom: 8,
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{u.name}</div>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>
-                        {u.email}
-                      </div>
-                    </div>
-                    <button onClick={() => startChatWith(u._id)}>Chat</button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Chat List */}
-          <div style={{ marginTop: 14 }}>
-            {chats.map((chat) => {
-              const p = getPartner(chat);
-              const isSelected = chat._id === activeChatId;
-              const isOnline = p ? onlineIds.has(p._id) : false;
-
-              return (
-                <div
-                  key={chat._id}
-                  onClick={() => setActiveChatId(chat._id)}
-                  style={{
-                    border: "1px solid #ddd",
-                    borderRadius: 10,
-                    padding: 10,
-                    marginBottom: 10,
-                    cursor: "pointer",
-                    background: isSelected ? "#eef" : "#fff",
-                  }}
-                >
-                  <div
-                    style={{ display: "flex", justifyContent: "space-between" }}
-                  >
-                    <div style={{ fontWeight: 700 }}>
-                      {p?.name || "Unknown"}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: isOnline ? "green" : "#999",
-                      }}
-                    >
-                      {isOnline ? "Online" : "Offline"}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, opacity: 0.8 }}>
-                    {p?.email || ""}
-                  </div>
-                  <div style={{ marginTop: 6, fontStyle: "italic" }}>
-                    {chat.lastMessage?.text || "No messages yet"}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Chat window */}
-        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <div>
-              <h3 style={{ margin: 0 }}>
-                {partner ? partner.name : "Select a chat"}
-              </h3>
-              {partner && (
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: partnerOnline ? "green" : "#999",
-                  }}
-                >
-                  {partnerOnline ? "Online" : "Offline"}
-                </div>
-              )}
-              {typingUserIds.size > 0 && (
-                <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>
-                  typing...
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div
-            style={{
-              marginTop: 12,
-              border: "1px solid #eee",
-              borderRadius: 10,
-              padding: 12,
-              height: 420,
-              overflowY: "auto",
-              background: "#fafafa",
-            }}
-          >
-            {messages.map((m) => {
-              const isMe = m.senderId === user?.id;
-              return (
-                <div
-                  key={m._id}
-                  style={{
-                    display: "flex",
-                    justifyContent: isMe ? "flex-end" : "flex-start",
-                    marginBottom: 10,
-                  }}
-                >
-                  <div
-                    style={{
-                      maxWidth: "70%",
-                      background: isMe ? "#d9fdd3" : "#fff",
-                      border: "1px solid #e5e5e5",
-                      borderRadius: 14,
-                      padding: "10px 12px",
-                    }}
-                  >
-                    <div style={{ whiteSpace: "pre-wrap" }}>{m.text}</div>
-                    <div
-                      style={{
-                        fontSize: 11,
-                        opacity: 0.7,
-                        marginTop: 6,
-                        textAlign: "right",
-                      }}
-                    >
-                      {formatTime(m.createdAt)}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-            <div ref={bottomRef} />
-          </div>
-
-          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <input
-              value={text}
-              onChange={(e) => handleTextChange(e.target.value)}
-              placeholder={
-                activeChatId ? "Type a message..." : "Select a chat first"
-              }
-              style={{ flex: 1, padding: 10 }}
-              disabled={!activeChatId}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") sendMessage();
-              }}
-            />
             <button
-              onClick={() => sendMessage()}
-              disabled={!activeChatId || !text.trim()}
+              onClick={logout}
+              className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
             >
-              Send
+              Logout
             </button>
           </div>
+
+          {/* main grid */}
+          <div className="grid h-[calc(100%-56px)] grid-cols-12">
+            {/* sidebar */}
+            <div className="col-span-12 border-r md:col-span-4">
+              <div className="flex items-center justify-between px-4 py-3">
+                <div className="text-sm font-semibold text-slate-900">
+                  Chats
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => refreshChats()}
+                    className="rounded-lg border px-3 py-1.5 text-sm hover:bg-slate-50"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    onClick={() => setSearchOpen((v) => !v)}
+                    className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+                  >
+                    New
+                  </button>
+                </div>
+              </div>
+
+              {/* new chat panel */}
+              {searchOpen && (
+                <div className="mx-4 mb-3 rounded-xl border bg-slate-50 p-3">
+                  <div className="mb-2 text-xs font-semibold text-slate-600">
+                    Start a new chat
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      value={searchEmail}
+                      onChange={(e) => setSearchEmail(e.target.value)}
+                      placeholder="Search by email…"
+                      className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-emerald-500"
+                    />
+                    <button
+                      onClick={() => searchUsers()}
+                      className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                    >
+                      Search
+                    </button>
+                  </div>
+
+                  {searchError && (
+                    <div className="mt-2 text-sm text-red-600">
+                      {searchError}
+                    </div>
+                  )}
+
+                  {searchResults.length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      {searchResults.map((u) => (
+                        <div
+                          key={u._id}
+                          className="flex items-center justify-between rounded-lg border bg-white p-3"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate font-semibold text-slate-900">
+                              {u.name}
+                            </div>
+                            <div className="truncate text-xs text-slate-500">
+                              {u.email}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => startChatWith(u._id)}
+                            className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+                          >
+                            Chat
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* chat list */}
+              <div className="h-[calc(100%-64px)] overflow-y-auto px-2 pb-3">
+                {chats.length === 0 && (
+                  <div className="px-4 py-8 text-sm text-slate-500">
+                    No chats yet. Click <b>New</b> to start.
+                  </div>
+                )}
+
+                {chats.map((chat) => {
+                  const p = getPartner(chat);
+                  const selected = chat._id === activeChatId;
+                  const isOnline = p ? onlineIds.has(p._id) : false;
+
+                  return (
+                    <button
+                      key={chat._id}
+                      onClick={() => setActiveChatId(chat._id)}
+                      className={[
+                        "mb-2 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left hover:bg-slate-50",
+                        selected
+                          ? "bg-emerald-50 ring-1 ring-emerald-200"
+                          : "bg-white",
+                      ].join(" ")}
+                    >
+                      <div className="relative">
+                        <div className="grid h-11 w-11 place-items-center rounded-full bg-slate-200 text-slate-700 font-semibold">
+                          {(p?.name?.[0] || "?").toUpperCase()}
+                        </div>
+                        <span
+                          className={[
+                            "absolute bottom-0 right-0 h-3 w-3 rounded-full ring-2 ring-white",
+                            isOnline ? "bg-emerald-500" : "bg-slate-400",
+                          ].join(" ")}
+                        />
+                      </div>
+
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="truncate font-semibold text-slate-900">
+                            {p?.name || "Unknown"}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            {isOnline ? "Online" : "Offline"}
+                          </div>
+                        </div>
+                        <div className="truncate text-xs text-slate-500">
+                          {p?.email || ""}
+                        </div>
+                        <div className="truncate text-sm text-slate-600">
+                          {chat.lastMessage?.text || "No messages yet"}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* chat window */}
+            <div className="col-span-12 flex flex-col md:col-span-8">
+              <div className="flex items-center justify-between border-b px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <div className="grid h-10 w-10 place-items-center rounded-full bg-slate-200 text-slate-700 font-semibold">
+                    {(partner?.name?.[0] || "C").toUpperCase()}
+                  </div>
+                  <div className="leading-tight">
+                    <div className="font-semibold text-slate-900">
+                      {partner ? partner.name : "Select a chat"}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {partner ? (partnerOnline ? "Online" : "Offline") : "—"}
+                      {typingUserIds.size > 0 ? " • typing…" : ""}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto bg-slate-50 p-4">
+                {!activeChatId ? (
+                  <div className="grid h-full place-items-center text-slate-500">
+                    Select a chat from the left
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {grouped.map((g) => (
+                      <div key={g.label}>
+                        <div className="mx-auto mb-3 w-fit rounded-full bg-white px-3 py-1 text-xs text-slate-500 shadow-sm">
+                          {g.label}
+                        </div>
+
+                        <div className="space-y-2">
+                          {g.items.map((m) => {
+                            const isMe = m.senderId === user?.id;
+                            return (
+                              <div
+                                key={m._id}
+                                className={[
+                                  "flex",
+                                  isMe ? "justify-end" : "justify-start",
+                                ].join(" ")}
+                              >
+                                <div
+                                  className={[
+                                    "max-w-[78%] rounded-2xl px-4 py-2 shadow-sm",
+                                    isMe
+                                      ? "bg-emerald-600 text-white rounded-br-md"
+                                      : "bg-white text-slate-900 rounded-bl-md",
+                                  ].join(" ")}
+                                >
+                                  <div className="whitespace-pre-wrap text-sm">
+                                    {m.text}
+                                  </div>
+                                  <div
+                                    className={[
+                                      "mt-1 text-right text-[11px]",
+                                      isMe
+                                        ? "text-emerald-100"
+                                        : "text-slate-400",
+                                    ].join(" ")}
+                                  >
+                                    {formatTime(m.createdAt)}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                    <div ref={bottomRef} />
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t bg-white p-3">
+                <div className="flex items-center gap-2">
+                  <input
+                    value={text}
+                    onChange={(e) => handleTextChange(e.target.value)}
+                    disabled={!activeChatId}
+                    placeholder={
+                      activeChatId ? "Type a message…" : "Select a chat first"
+                    }
+                    className="w-full rounded-xl border px-4 py-3 text-sm outline-none focus:border-emerald-500 disabled:bg-slate-100"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") sendMessage();
+                    }}
+                  />
+                  <button
+                    onClick={() => sendMessage()}
+                    disabled={!activeChatId || !text.trim()}
+                    className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    Send
+                  </button>
+                </div>
+
+                <div className="mt-2 text-xs text-slate-400">
+                  Press <b>Enter</b> to send
+                </div>
+              </div>
+            </div>
+          </div>
+          {/* end main */}
         </div>
       </div>
     </div>

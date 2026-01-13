@@ -1,8 +1,8 @@
-import { io, Socket } from "socket.io-client";
+import { io } from "socket.io-client";
 
-export function createSocket(token: string): Socket {
+export function createSocket(token: string) {
   return io("http://localhost:5000", {
     auth: { token },
-    withCredentials: true,
+    transports: ["websocket"],
   });
 }
