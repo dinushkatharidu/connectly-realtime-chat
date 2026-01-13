@@ -32,28 +32,22 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState<string>("");
 
-  // Presence
   const [onlineIds, setOnlineIds] = useState<Set<string>>(() => new Set());
 
-  // New chat search
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchEmail, setSearchEmail] = useState("");
   const [searchResults, setSearchResults] = useState<UserLite[]>([]);
   const [searchError, setSearchError] = useState<string | null>(null);
 
-  // Typing indicator
   const [typingUserIds, setTypingUserIds] = useState<Set<string>>(
     () => new Set()
   );
   const typingTimeoutRef = useRef<number | null>(null);
 
-  // Scroll
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // ✅ Create ONE socket per token (stable)
   const socket = useMemo(() => {
     if (!token) return null;
-    // include websocket transport to reduce polling issues
     return createSocket(token);
   }, [token]);
 
@@ -76,7 +70,6 @@ export default function ChatPage() {
     setMessages(res.data);
   }, []);
 
-  // ✅ FIX: send message and instantly show in UI using response
   const sendMessage = useCallback(async () => {
     if (!activeChatId || !text.trim()) return;
 
@@ -86,14 +79,15 @@ export default function ChatPage() {
         text: text.trim(),
       });
 
-      // ✅ show immediately (no refresh needed)
-      setMessages((prev) => [...prev, res.data]);
+      // ✅ append immediately, but dedupe by _id
+      setMessages((prev) => {
+        const exists = prev.some((m) => m._id === res.data._id);
+        if (exists) return prev;
+        return [...prev, res.data];
+      });
+
       setText("");
-
-      // update chats list preview (last message)
       refreshChats().catch(() => {});
-
-      // stop typing
       socket?.emit("typing", { chatId: activeChatId, isTyping: false });
     } catch (e) {
       console.error("sendMessage failed", e);
@@ -130,7 +124,6 @@ export default function ChatPage() {
       setActiveChatId(newChat._id);
       await loadMessages(newChat._id);
 
-      // join + mark seen
       socket?.emit("join_chat", newChat._id);
       socket?.emit("chat:seen", { chatId: newChat._id });
 
@@ -142,7 +135,7 @@ export default function ChatPage() {
     [refreshChats, loadMessages, socket]
   );
 
-  // Initial load chats
+  // Initial load
   useEffect(() => {
     let alive = true;
 
@@ -163,7 +156,7 @@ export default function ChatPage() {
     };
   }, []);
 
-  // When active chat changes: load messages + join room + mark seen
+  // On active chat change
   useEffect(() => {
     if (!activeChatId) return;
 
@@ -175,10 +168,7 @@ export default function ChatPage() {
       setTypingUserIds(new Set());
       await loadMessages(activeChatId);
 
-      // ✅ always join room for realtime
       socket?.emit("join_chat", activeChatId);
-
-      // ✅ mark seen when opening chat
       socket?.emit("chat:seen", { chatId: activeChatId });
     }
 
@@ -189,16 +179,19 @@ export default function ChatPage() {
     };
   }, [activeChatId, loadMessages, socket]);
 
-  // ✅ SOCKET LISTENERS (IMPORTANT: DO NOT disconnect on cleanup)
+  // Socket listeners (no disconnect here)
   useEffect(() => {
     if (!socket) return;
 
     const onPresence = (ids: string[]) => setOnlineIds(new Set(ids));
 
     const onNewMessage = (msg: Message) => {
-      // other user's message arrives here
       if (msg.chatId === activeChatId) {
-        setMessages((prev) => [...prev, msg]);
+        setMessages((prev) => {
+          const exists = prev.some((m) => m._id === msg._id);
+          if (exists) return prev;
+          return [...prev, msg];
+        });
         socket.emit("chat:seen", { chatId: activeChatId });
       }
       refreshChats().catch(() => {});
@@ -222,16 +215,14 @@ export default function ChatPage() {
       socket.off("presence:list", onPresence);
       socket.off("new_message", onNewMessage);
       socket.off("typing", onTyping);
-      // ❌ DO NOT socket.disconnect() here
     };
   }, [socket, activeChatId, refreshChats, user?.id]);
 
-  // Auto scroll
+  // Scroll to bottom
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Typing debounce emit
   const handleTextChange = useCallback(
     (v: string) => {
       setText(v);
@@ -253,7 +244,7 @@ export default function ChatPage() {
   const partner = activeChat ? getPartner(activeChat) : null;
   const partnerOnline = partner ? onlineIds.has(partner._id) : false;
 
-  // group messages by date
+  // Group messages by date
   const grouped: Array<{ label: string; items: Message[] }> = [];
   for (const m of messages) {
     const label = dayLabel(m.createdAt);
@@ -263,18 +254,23 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="h-screen bg-slate-100">
+    <div className="h-full bg-slate-100 overflow-hidden">
+      {/* ✅ this wrapper prevents body scrolling */}
       <div className="mx-auto h-full max-w-6xl p-3 md:p-4">
-        <div className="h-full overflow-hidden rounded-2xl bg-white shadow-lg">
-          {/* top bar */}
-          <div className="flex items-center justify-between border-b px-4 py-3">
-            <div className="flex items-center gap-3">
+        <div className="h-full overflow-hidden rounded-2xl bg-white shadow-lg flex flex-col">
+          {/* ✅ top bar stays visible */}
+          <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
+            <div className="flex items-center gap-3 min-w-0">
               <div className="grid h-10 w-10 place-items-center rounded-full bg-emerald-600 text-white font-semibold">
                 {user?.name?.slice(0, 1)?.toUpperCase() || "U"}
               </div>
-              <div className="leading-tight">
-                <div className="font-semibold text-slate-900">{user?.name}</div>
-                <div className="text-xs text-slate-500">{user?.email}</div>
+              <div className="leading-tight min-w-0">
+                <div className="font-semibold text-slate-900 truncate">
+                  {user?.name}
+                </div>
+                <div className="text-xs text-slate-500 truncate">
+                  {user?.email}
+                </div>
               </div>
             </div>
 
@@ -286,11 +282,11 @@ export default function ChatPage() {
             </button>
           </div>
 
-          {/* main grid */}
-          <div className="grid h-[calc(100%-56px)] grid-cols-12">
-            {/* sidebar */}
-            <div className="col-span-12 border-r md:col-span-4">
-              <div className="flex items-center justify-between px-4 py-3">
+          {/* ✅ grid must be min-h-0 so inner scroll works */}
+          <div className="grid grid-cols-12 flex-1 min-h-0">
+            {/* Sidebar (flex column + scroll list) */}
+            <div className="col-span-12 border-r md:col-span-4 flex flex-col min-h-0">
+              <div className="flex items-center justify-between px-4 py-3 shrink-0">
                 <div className="text-sm font-semibold text-slate-900">
                   Chats
                 </div>
@@ -310,9 +306,8 @@ export default function ChatPage() {
                 </div>
               </div>
 
-              {/* new chat panel */}
               {searchOpen && (
-                <div className="mx-4 mb-3 rounded-xl border bg-slate-50 p-3">
+                <div className="mx-4 mb-3 rounded-xl border bg-slate-50 p-3 shrink-0">
                   <div className="mb-2 text-xs font-semibold text-slate-600">
                     Start a new chat
                   </div>
@@ -364,9 +359,9 @@ export default function ChatPage() {
                   )}
                 </div>
               )}
-
-              {/* chat list */}
-              <div className="h-[calc(100%-64px)] overflow-y-auto px-2 pb-3">
+                            
+              {/* ✅ scrollable chat list */}
+              <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-3">
                 {chats.length === 0 && (
                   <div className="px-4 py-8 text-sm text-slate-500">
                     No chats yet. Click <b>New</b> to start.
@@ -423,18 +418,19 @@ export default function ChatPage() {
               </div>
             </div>
 
-            {/* chat window */}
-            <div className="col-span-12 flex flex-col md:col-span-8">
-              <div className="flex items-center justify-between border-b px-4 py-3">
-                <div className="flex items-center gap-3">
+            {/* Chat window (flex + scroll messages) */}
+            <div className="col-span-12 md:col-span-8 flex flex-col min-h-0">
+              {/* header */}
+              <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
+                <div className="flex items-center gap-3 min-w-0">
                   <div className="grid h-10 w-10 place-items-center rounded-full bg-slate-200 text-slate-700 font-semibold">
                     {(partner?.name?.[0] || "C").toUpperCase()}
                   </div>
-                  <div className="leading-tight">
-                    <div className="font-semibold text-slate-900">
+                  <div className="leading-tight min-w-0">
+                    <div className="font-semibold text-slate-900 truncate">
                       {partner ? partner.name : "Select a chat"}
                     </div>
-                    <div className="text-xs text-slate-500">
+                    <div className="text-xs text-slate-500 truncate">
                       {partner ? (partnerOnline ? "Online" : "Offline") : "—"}
                       {typingUserIds.size > 0 ? " • typing…" : ""}
                     </div>
@@ -442,7 +438,8 @@ export default function ChatPage() {
                 </div>
               </div>
 
-              <div className="flex-1 overflow-y-auto bg-slate-50 p-4">
+              {/* ✅ scrollable messages */}
+              <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 p-4">
                 {!activeChatId ? (
                   <div className="grid h-full place-items-center text-slate-500">
                     Select a chat from the left
@@ -499,7 +496,8 @@ export default function ChatPage() {
                 )}
               </div>
 
-              <div className="border-t bg-white p-3">
+              {/* composer */}
+              <div className="border-t bg-white p-3 shrink-0">
                 <div className="flex items-center gap-2">
                   <input
                     value={text}
@@ -528,7 +526,7 @@ export default function ChatPage() {
               </div>
             </div>
           </div>
-          {/* end main */}
+          {/* end grid */}
         </div>
       </div>
     </div>
