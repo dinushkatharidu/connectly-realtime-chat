@@ -17,6 +17,9 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState<string>("");
 
+  // presence
+  const [onlineIds, setOnlineIds] = useState<Set<string>>(() => new Set());
+
   // new chat search
   const [searchEmail, setSearchEmail] = useState<string>("");
   const [searchResults, setSearchResults] = useState<UserLite[]>([]);
@@ -35,20 +38,10 @@ export default function ChatPage() {
     return createSocket(token);
   }, [token]);
 
-  const getPartnerName = useCallback(
-    (chat: Chat): string => {
+  const getPartner = useCallback(
+    (chat: Chat) => {
       const me = user?.id;
-      const partner = chat.members.find((m) => m._id !== me);
-      return partner ? partner.name : "Unknown";
-    },
-    [user?.id]
-  );
-
-  const getPartnerEmail = useCallback(
-    (chat: Chat): string => {
-      const me = user?.id;
-      const partner = chat.members.find((m) => m._id !== me);
-      return partner ? partner.email : "";
+      return chat.members.find((m) => m._id !== me) || null;
     },
     [user?.id]
   );
@@ -56,11 +49,7 @@ export default function ChatPage() {
   const refreshChats = useCallback(async () => {
     const res = await api.get<Chat[]>("/api/chats");
     setChats(res.data);
-
-    // auto-select first chat if none selected
-    if (!activeChatId && res.data.length > 0) {
-      setActiveChatId(res.data[0]._id);
-    }
+    if (!activeChatId && res.data.length > 0) setActiveChatId(res.data[0]._id);
   }, [activeChatId]);
 
   const loadMessages = useCallback(async (chatId: string) => {
@@ -70,13 +59,11 @@ export default function ChatPage() {
 
   const sendMessage = useCallback(async () => {
     if (!activeChatId || !text.trim()) return;
-
     await api.post("/api/chats/message", {
       chatId: activeChatId,
       text: text.trim(),
     });
     setText("");
-
     socket?.emit("typing", { chatId: activeChatId, isTyping: false });
   }, [activeChatId, text, socket]);
 
@@ -96,9 +83,7 @@ export default function ChatPage() {
       );
       setSearchResults(res.data);
       if (res.data.length === 0) setSearchError("No users found");
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    } catch (e: unknown) {
-      // no "any" allowed: handle unknown safely
+    } catch {
       setSearchError("Search failed");
     }
   }, [searchEmail]);
@@ -113,6 +98,7 @@ export default function ChatPage() {
       await loadMessages(newChat._id);
 
       socket?.emit("join_chat", newChat._id);
+      socket?.emit("chat:seen", { chatId: newChat._id });
 
       setSearchResults([]);
       setSearchEmail("");
@@ -121,64 +107,61 @@ export default function ChatPage() {
     [refreshChats, loadMessages, socket]
   );
 
-  // Initial load chats (ESLint-safe)
+  // Initial chats
   useEffect(() => {
     let active = true;
-
     async function init() {
       try {
         const res = await api.get<Chat[]>("/api/chats");
         if (!active) return;
-
         setChats(res.data);
         if (res.data.length > 0) setActiveChatId(res.data[0]._id);
-      } catch (err) {
-        console.error("Failed to load chats", err);
+      } catch (e) {
+        console.error(e);
       }
     }
-
     init();
-
     return () => {
       active = false;
     };
   }, []);
 
-  // When chat changes: clear typing + load messages + join room (ESLint-safe)
+  // On active chat change: load + join + mark seen
   useEffect(() => {
     if (!activeChatId) return;
 
     let active = true;
-
     async function onChatChange() {
-      // move setState into async function (to satisfy your ESLint rule)
       if (!active) return;
       setTypingUserIds(new Set());
       await loadMessages(activeChatId);
       socket?.emit("join_chat", activeChatId);
+      socket?.emit("chat:seen", { chatId: activeChatId });
     }
-
     onChatChange();
-
     return () => {
       active = false;
     };
   }, [activeChatId, loadMessages, socket]);
 
-  // Socket listeners
+  // Socket listeners (presence + messages + typing + seen)
   useEffect(() => {
     if (!socket) return;
+
+    const onPresence = (ids: string[]) => {
+      setOnlineIds(new Set(ids));
+    };
 
     const onNewMessage = (msg: Message) => {
       if (msg.chatId === activeChatId) {
         setMessages((prev) => [...prev, msg]);
+        socket.emit("chat:seen", { chatId: activeChatId });
       }
       refreshChats().catch(() => {});
     };
 
     const onTyping = (data: { userId: string; isTyping: boolean }) => {
       if (data.userId === user?.id) return;
-
       setTypingUserIds((prev) => {
         const next = new Set(prev);
         if (data.isTyping) next.add(data.userId);
@@ -187,26 +170,35 @@ export default function ChatPage() {
       });
     };
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const onSeen = (_data: { chatId: string; userId: string }) => {
+      // For now we just refresh chats/messages to reflect seenBy updates if needed
+      // (simple approach)
+      refreshChats().catch(() => {});
+    };
+
+    socket.on("presence:list", onPresence);
     socket.on("new_message", onNewMessage);
     socket.on("typing", onTyping);
+    socket.on("chat:seen", onSeen);
 
     return () => {
+      socket.off("presence:list", onPresence);
       socket.off("new_message", onNewMessage);
       socket.off("typing", onTyping);
+      socket.off("chat:seen", onSeen);
       socket.disconnect();
     };
   }, [socket, activeChatId, refreshChats, user?.id]);
 
-  // Auto scroll
+  // Scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Typing emit (debounced)
   const handleTextChange = useCallback(
     (v: string) => {
       setText(v);
-
       if (!socket || !activeChatId) return;
 
       socket.emit("typing", { chatId: activeChatId, isTyping: true });
@@ -221,10 +213,11 @@ export default function ChatPage() {
   );
 
   const activeChat = chats.find((c) => c._id === activeChatId);
+  const partner = activeChat ? getPartner(activeChat) : null;
+  const partnerOnline = partner ? onlineIds.has(partner._id) : false;
 
   return (
     <div style={{ padding: 16, fontFamily: "sans-serif" }}>
-      {/* Top */}
       <div
         style={{
           display: "flex",
@@ -258,7 +251,6 @@ export default function ChatPage() {
             }}
           >
             <h4 style={{ margin: "6px 0" }}>Start New Chat</h4>
-
             <div style={{ display: "flex", gap: 8 }}>
               <input
                 value={searchEmail}
@@ -307,7 +299,10 @@ export default function ChatPage() {
           {/* Chat List */}
           <div style={{ marginTop: 14 }}>
             {chats.map((chat) => {
-              const selected = chat._id === activeChatId;
+              const p = getPartner(chat);
+              const isSelected = chat._id === activeChatId;
+              const isOnline = p ? onlineIds.has(p._id) : false;
+
               return (
                 <div
                   key={chat._id}
@@ -318,12 +313,26 @@ export default function ChatPage() {
                     padding: 10,
                     marginBottom: 10,
                     cursor: "pointer",
-                    background: selected ? "#eef" : "#fff",
+                    background: isSelected ? "#eef" : "#fff",
                   }}
                 >
-                  <div style={{ fontWeight: 700 }}>{getPartnerName(chat)}</div>
+                  <div
+                    style={{ display: "flex", justifyContent: "space-between" }}
+                  >
+                    <div style={{ fontWeight: 700 }}>
+                      {p?.name || "Unknown"}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: isOnline ? "green" : "#999",
+                      }}
+                    >
+                      {isOnline ? "Online" : "Offline"}
+                    </div>
+                  </div>
                   <div style={{ fontSize: 12, opacity: 0.8 }}>
-                    {getPartnerEmail(chat)}
+                    {p?.email || ""}
                   </div>
                   <div style={{ marginTop: 6, fontStyle: "italic" }}>
                     {chat.lastMessage?.text || "No messages yet"}
@@ -336,15 +345,34 @@ export default function ChatPage() {
 
         {/* Chat window */}
         <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-          <h3 style={{ margin: 0 }}>
-            {activeChat ? getPartnerName(activeChat) : "Select a chat"}
-          </h3>
-
-          {typingUserIds.size > 0 && (
-            <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>
-              typing...
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <div>
+              <h3 style={{ margin: 0 }}>
+                {partner ? partner.name : "Select a chat"}
+              </h3>
+              {partner && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: partnerOnline ? "green" : "#999",
+                  }}
+                >
+                  {partnerOnline ? "Online" : "Offline"}
+                </div>
+              )}
+              {typingUserIds.size > 0 && (
+                <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>
+                  typing...
+                </div>
+              )}
             </div>
-          )}
+          </div>
 
           <div
             style={{
