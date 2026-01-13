@@ -174,16 +174,23 @@ export async function sendMessage(req: AuthRequest, res: Response) {
     const isMember = chat.members.some((m) => m.toString() === myIdStr);
     if (!isMember) return res.status(403).json({ message: "Access denied" });
 
+    // receiver userId (1-to-1 chat)
+    const receiverIdStr =
+      chat.members.map((m) => m.toString()).find((id) => id !== myIdStr) ||
+      null;
+
     const message = await MessageModel.create({
       chatId: toObjectId(chatIdStr),
       senderId: toObjectId(myIdStr),
       text,
+      deliveredTo: receiverIdStr ? [toObjectId(receiverIdStr)] : [],
+      // seenBy is empty initially
     });
 
     chat.lastMessage = message._id;
     await chat.save();
 
-    // ✅ Emit real-time message to everyone in this chat room
+    // Emit real-time
     const io = getIO();
     io.to(chatIdStr).emit("new_message", message);
 

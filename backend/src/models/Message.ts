@@ -1,13 +1,17 @@
-import mongoose, { Schema, InferSchemaType } from "mongoose";
+import mongoose, { Schema, InferSchemaType, model } from "mongoose";
 
 const messageSchema = new Schema(
   {
     chatId: { type: Schema.Types.ObjectId, ref: "Chat", required: true },
     senderId: { type: Schema.Types.ObjectId, ref: "User", required: true },
-    text: { type: String, required: true, trim: true },
+    text: { type: String, required: true },
+
+    // ✅ Phase 10
+    deliveredTo: [{ type: Schema.Types.ObjectId, ref: "User", default: [] }],
+    seenBy: [{ type: Schema.Types.ObjectId, ref: "User", default: [] }],
   },
   { timestamps: true }
 );
 
-export type Message = InferSchemaType<typeof messageSchema>;
-export const MessageModel = mongoose.model("Message", messageSchema);
+export type MessageDoc = InferSchemaType<typeof messageSchema>;
+export const MessageModel = model("Message", messageSchema);
