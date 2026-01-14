@@ -1,68 +1,56 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import mongoose from "mongoose";
+import path from "path";
 import http from "http";
 import { Server } from "socket.io";
-import mongoose from "mongoose";
 
-import authRoutes from "./routes/auth.routes";
-import chatRoutes from "./routes/chat.routes";
+import uploadRoutes from "./routes/upload.routes";
+import chatRoutes from "./routes/chat.routes"; // your existing chat routes
+import authRoutes from "./routes/auth.routes"; // your existing auth routes
+import userRoutes from "./routes/user.routes"; // your existing user routes
 
-import { setupSocket } from "./config/socket";
-import { setIO } from "./config/io";
-import userRoutes from "./routes/user.routes";
-
+import { setupSocket } from "./config/socket"; // your socket setup
 
 dotenv.config();
 
-const app = express();
+const app = express(); // ✅ app declared FIRST
+
+app.use(cors({ origin: "http://localhost:5173", credentials: true }));
 app.use(express.json());
 
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL,
-    credentials: true,
-  })
-);
+// ✅ serve uploaded files
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
-app.use("/api/users", userRoutes);
-
-
-app.get("/", (_req, res) => {
-  res.send("Connectly API is running ✅");
-});
-
+// ✅ routes
 app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
 app.use("/api/chats", chatRoutes);
+app.use("/api/upload", uploadRoutes);
 
-// ---- Create HTTP server (Socket.IO attaches here) ----
+// ✅ create http server + socket
 const server = http.createServer(app);
 
-// ---- Socket.IO server ----
-const io = new Server(server, {
-  cors: {
-    origin: process.env.CLIENT_URL,
-    credentials: true,
-  },
+export const io = new Server(server, {
+  cors: { origin: "http://localhost:5173", credentials: true },
 });
 
-setIO(io); // ✅ make io accessible from controllers
-setupSocket(io); // ✅ define socket events
+setupSocket(io);
 
+// ✅ connect DB + start server
 const PORT = process.env.PORT || 5000;
+const MONGO_URI = process.env.MONGO_URI as string;
 
-async function start() {
-  try {
-    await mongoose.connect(process.env.MONGO_URI as string);
+mongoose
+  .connect(MONGO_URI)
+  .then(() => {
     console.log("✅ MongoDB connected");
-
-    server.listen(PORT, () => {
-      console.log(`✅ Server running on http://localhost:${PORT}`);
-    });
-  } catch (err) {
-    console.error("❌ Startup error:", err);
+    server.listen(PORT, () =>
+      console.log(`✅ Server running on http://localhost:${PORT}`)
+    );
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB connection error:", err);
     process.exit(1);
-  }
-}
-
-start();
+  });

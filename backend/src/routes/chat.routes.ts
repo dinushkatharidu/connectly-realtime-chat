@@ -1,19 +1,17 @@
 import { Router } from "express";
-import { requireAuth } from "../middleware/auth.middleware";
+import { requireAuth } from "../middleware/requireAuth";
 import {
   createChat,
-  listMyChats,
-  getMessages,
+  getMessagesByChat,
+  getMyChats,
   sendMessage,
 } from "../controllers/chat.controller";
 
 const router = Router();
 
-router.use(requireAuth);
-
-router.post("/", createChat);
-router.get("/", listMyChats);
-router.get("/:chatId/messages", getMessages);
-router.post("/message", sendMessage);
+router.get("/", requireAuth, getMyChats);
+router.post("/", requireAuth, createChat);
+router.get("/:chatId/messages", requireAuth, getMessagesByChat);
+router.post("/message", requireAuth, sendMessage);
 
 export default router;
