@@ -56,7 +56,6 @@ export default function ChatPage() {
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // ✅ file upload states
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
 
@@ -84,7 +83,6 @@ export default function ChatPage() {
     setMessages(res.data);
   }, []);
 
-  // ✅ upload helper
   const uploadSingle = useCallback(async (file: File) => {
     const form = new FormData();
     form.append("file", file);
@@ -96,7 +94,6 @@ export default function ChatPage() {
     return res.data;
   }, []);
 
-  // ✅ send message (text + attachment)
   const sendMessage = useCallback(async () => {
     if (!activeChatId) return;
     if (!text.trim() && !selectedFile) return;
@@ -118,7 +115,6 @@ export default function ChatPage() {
         attachments,
       });
 
-      // ✅ optimistic add + dedupe
       setMessages((prev) => {
         const exists = prev.some((m) => m._id === res.data._id);
         return exists ? prev : [...prev, res.data];
@@ -132,6 +128,25 @@ export default function ChatPage() {
       setUploading(false);
     }
   }, [activeChatId, text, selectedFile, uploadSingle, refreshChats, socket]);
+
+  // ✅ delete message
+  const deleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!confirm("Delete this message?")) return;
+
+      // optimistic remove
+      setMessages((prev) => prev.filter((m) => m._id !== messageId));
+
+      try {
+        await api.delete(`/api/messages/${messageId}`);
+      } catch (e) {
+        console.error("delete failed", e);
+        // reload messages if delete failed
+        if (activeChatId) loadMessages(activeChatId).catch(() => {});
+      }
+    },
+    [activeChatId, loadMessages]
+  );
 
   const searchUsers = useCallback(async () => {
     setSearchError(null);
@@ -174,7 +189,6 @@ export default function ChatPage() {
     [refreshChats, loadMessages, socket]
   );
 
-  // initial load
   useEffect(() => {
     let alive = true;
 
@@ -195,7 +209,6 @@ export default function ChatPage() {
     };
   }, []);
 
-  // on active chat change
   useEffect(() => {
     if (!activeChatId) return;
 
@@ -218,7 +231,6 @@ export default function ChatPage() {
     };
   }, [activeChatId, loadMessages, socket]);
 
-  // socket listeners
   useEffect(() => {
     if (!socket) return;
 
@@ -246,23 +258,29 @@ export default function ChatPage() {
       });
     };
 
+    // ✅ handle delete event from other user
+    const onMessageDeleted = (data: { chatId: string; messageId: string }) => {
+      if (data.chatId !== activeChatId) return;
+      setMessages((prev) => prev.filter((m) => m._id !== data.messageId));
+    };
+
     socket.on("presence:list", onPresence);
     socket.on("new_message", onNewMessage);
     socket.on("typing", onTyping);
+    socket.on("message_deleted", onMessageDeleted);
 
     return () => {
       socket.off("presence:list", onPresence);
       socket.off("new_message", onNewMessage);
       socket.off("typing", onTyping);
+      socket.off("message_deleted", onMessageDeleted);
     };
   }, [socket, activeChatId, refreshChats, user?.id]);
 
-  // scroll to bottom on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // typing debounce
   const handleTextChange = useCallback(
     (v: string) => {
       setText(v);
@@ -284,7 +302,6 @@ export default function ChatPage() {
   const partner = activeChat ? getPartner(activeChat) : null;
   const partnerOnline = partner ? onlineIds.has(partner._id) : false;
 
-  // group by date
   const grouped: Array<{ label: string; items: Message[] }> = [];
   for (const m of messages) {
     const label = dayLabel(m.createdAt);
@@ -297,7 +314,6 @@ export default function ChatPage() {
     <div className="h-full bg-slate-100 overflow-hidden">
       <div className="mx-auto h-full max-w-6xl p-3 md:p-4">
         <div className="h-full overflow-hidden rounded-2xl bg-white shadow-lg flex flex-col">
-          {/* top bar */}
           <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
             <div className="flex items-center gap-3 min-w-0">
               <div className="grid h-10 w-10 place-items-center rounded-full bg-emerald-600 text-white font-semibold">
@@ -321,9 +337,7 @@ export default function ChatPage() {
             </button>
           </div>
 
-          {/* main */}
           <div className="grid grid-cols-12 flex-1 min-h-0">
-            {/* sidebar */}
             <div className="col-span-12 border-r md:col-span-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between px-4 py-3 shrink-0">
                 <div className="text-sm font-semibold text-slate-900">
@@ -400,12 +414,6 @@ export default function ChatPage() {
               )}
 
               <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-3">
-                {chats.length === 0 && (
-                  <div className="px-4 py-8 text-sm text-slate-500">
-                    No chats yet. Click <b>New</b> to start.
-                  </div>
-                )}
-
                 {chats.map((chat) => {
                   const p = getPartner(chat);
                   const selected = chat._id === activeChatId;
@@ -456,7 +464,6 @@ export default function ChatPage() {
               </div>
             </div>
 
-            {/* chat area */}
             <div className="col-span-12 md:col-span-8 flex flex-col min-h-0">
               <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
                 <div className="flex items-center gap-3 min-w-0">
@@ -475,31 +482,26 @@ export default function ChatPage() {
                 </div>
               </div>
 
-              {/* messages */}
               <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 p-4">
-                {!activeChatId ? (
-                  <div className="grid h-full place-items-center text-slate-500">
-                    Select a chat from the left
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    {grouped.map((g) => (
-                      <div key={g.label}>
-                        <div className="mx-auto mb-3 w-fit rounded-full bg-white px-3 py-1 text-xs text-slate-500 shadow-sm">
-                          {g.label}
-                        </div>
+                <div className="space-y-4">
+                  {grouped.map((g) => (
+                    <div key={g.label}>
+                      <div className="mx-auto mb-3 w-fit rounded-full bg-white px-3 py-1 text-xs text-slate-500 shadow-sm">
+                        {g.label}
+                      </div>
 
-                        <div className="space-y-2">
-                          {g.items.map((m) => {
-                            const isMe = m.senderId === user?.id;
-                            return (
-                              <div
-                                key={m._id}
-                                className={[
-                                  "flex",
-                                  isMe ? "justify-end" : "justify-start",
-                                ].join(" ")}
-                              >
+                      <div className="space-y-2">
+                        {g.items.map((m) => {
+                          const isMe = m.senderId === user?.id;
+                          return (
+                            <div
+                              key={m._id}
+                              className={[
+                                "flex",
+                                isMe ? "justify-end" : "justify-start",
+                              ].join(" ")}
+                            >
+                              <div className="flex items-start gap-2">
                                 <div
                                   className={[
                                     "max-w-[78%] rounded-2xl px-4 py-2 shadow-sm",
@@ -514,7 +516,6 @@ export default function ChatPage() {
                                     </div>
                                   )}
 
-                                  {/* attachments */}
                                   {m.attachments?.map((a) => {
                                     const fullUrl = `http://localhost:5000${a.url}`;
                                     const isImage = a.type.startsWith("image/");
@@ -568,18 +569,28 @@ export default function ChatPage() {
                                     {formatTime(m.createdAt)}
                                   </div>
                                 </div>
+
+                                {/* ✅ delete button for my messages */}
+                                {isMe && (
+                                  <button
+                                    onClick={() => deleteMessage(m._id)}
+                                    className="mt-2 rounded-lg border bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                                    title="Delete message"
+                                  >
+                                    🗑
+                                  </button>
+                                )}
                               </div>
-                            );
-                          })}
-                        </div>
+                            </div>
+                          );
+                        })}
                       </div>
-                    ))}
-                    <div ref={bottomRef} />
-                  </div>
-                )}
+                    </div>
+                  ))}
+                  <div ref={bottomRef} />
+                </div>
               </div>
 
-              {/* composer (📎 is here) */}
               <div className="border-t bg-white p-3 shrink-0">
                 <div className="flex items-center gap-2">
                   <input
