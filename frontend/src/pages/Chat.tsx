@@ -42,7 +42,6 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState<string>("");
 
-  
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchEmail, setSearchEmail] = useState("");
   const [searchResults, setSearchResults] = useState<UserLite[]>([]);
@@ -60,6 +59,16 @@ export default function ChatPage() {
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState<string>("");
+
+  // ✅ WhatsApp-style menu state
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+
+  // ✅ Close menu on outside click
+  useEffect(() => {
+    const close = () => setOpenMenuId(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, []);
 
   const socket = useMemo(() => {
     if (!token) return null;
@@ -95,21 +104,18 @@ export default function ChatPage() {
     return res.data;
   }, []);
 
-  // ✅ ONLY load messages here (user action). No loadMessages inside useEffect.
   const handleSelectChat = useCallback(
     async (chatId: string) => {
       if (!chatId) return;
 
-      // leave prev
       if (socket && activeChatId) socket.emit("leave_chat", activeChatId);
 
-      // reset UI
       setTypingUserIds(new Set());
       setEditingId(null);
       setEditingText("");
       setSelectedFile(null);
+      setOpenMenuId(null);
 
-      // set chat + join room + load messages
       setActiveChatId(chatId);
       socket?.emit("join_chat", chatId);
 
@@ -165,7 +171,6 @@ export default function ChatPage() {
 
     const nowIso = new Date().toISOString();
 
-    // optimistic
     setMessages((prev) =>
       prev.map((m) =>
         m._id === editingId ? { ...m, text: newText, editedAt: nowIso } : m
@@ -179,7 +184,6 @@ export default function ChatPage() {
       refreshChats().catch(() => {});
     } catch (e) {
       console.error("edit failed", e);
-      // reload only if edit fails
       if (activeChatId) loadMessages(activeChatId).catch(() => {});
     }
   }, [editingId, editingText, activeChatId, loadMessages, refreshChats]);
@@ -195,7 +199,6 @@ export default function ChatPage() {
 
       const nowIso = new Date().toISOString();
 
-      // optimistic
       setMessages((prev) =>
         prev.map((m) =>
           m._id === messageId
@@ -259,7 +262,6 @@ export default function ChatPage() {
     [refreshChats, handleSelectChat]
   );
 
-  // initial load
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -268,7 +270,6 @@ export default function ChatPage() {
         if (!alive) return;
         setChats(res.data);
 
-        // auto open first chat ONLY ONCE (user action simulation)
         if (res.data.length > 0) {
           const first = res.data[0]._id;
           setActiveChatId(first);
@@ -284,9 +285,8 @@ export default function ChatPage() {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // keep this as one-time init
+  }, []);
 
-  // socket listeners (NO loadMessages here!)
   useEffect(() => {
     if (!socket) return;
 
@@ -309,7 +309,6 @@ export default function ChatPage() {
       editedAt: string | null;
     }) => {
       if (data.chatId !== activeChatId) return;
-
       setMessages((prev) =>
         prev.map((m) =>
           m._id === data.messageId
@@ -326,7 +325,6 @@ export default function ChatPage() {
       deletedAt: string | null;
     }) => {
       if (data.chatId !== activeChatId) return;
-
       setMessages((prev) =>
         prev.map((m) =>
           m._id === data.messageId
@@ -343,14 +341,8 @@ export default function ChatPage() {
       );
     };
 
-    const onTyping = (data: {
-      userId: string;
-      isTyping: boolean;
-      chatId?: string;
-    }) => {
-      // if server doesn't send chatId, ignore
+    const onTyping = (data: { userId: string; isTyping: boolean }) => {
       if (data.userId === user?.id) return;
-
       setTypingUserIds((prev) => {
         const next = new Set(prev);
         if (data.isTyping) next.add(data.userId);
@@ -406,6 +398,7 @@ export default function ChatPage() {
     <div className="h-full bg-slate-100 overflow-hidden">
       <div className="mx-auto h-full max-w-6xl p-3 md:p-4">
         <div className="h-full overflow-hidden rounded-2xl bg-white shadow-lg flex flex-col">
+          {/* Top header */}
           <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
             <div className="flex items-center gap-3 min-w-0">
               <div className="grid h-10 w-10 place-items-center rounded-full bg-emerald-600 text-white font-semibold">
@@ -430,6 +423,7 @@ export default function ChatPage() {
           </div>
 
           <div className="grid grid-cols-12 flex-1 min-h-0">
+            {/* Left: chat list */}
             <div className="col-span-12 border-r md:col-span-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between px-4 py-3 shrink-0">
                 <div className="text-sm font-semibold text-slate-900">
@@ -542,6 +536,7 @@ export default function ChatPage() {
               </div>
             </div>
 
+            {/* Right: messages */}
             <div className="col-span-12 md:col-span-8 flex flex-col min-h-0">
               <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
                 <div className="font-semibold text-slate-900 truncate">
@@ -575,12 +570,56 @@ export default function ChatPage() {
                             >
                               <div
                                 className={[
-                                  "max-w-[78%] rounded-2xl px-4 py-2 shadow-sm",
+                                  "max-w-[78%] rounded-2xl px-4 py-2 shadow-sm relative",
                                   isMe
                                     ? "bg-emerald-600 text-white rounded-br-md"
                                     : "bg-white text-slate-900 rounded-bl-md",
                                 ].join(" ")}
                               >
+                                {/* ✅ 3-dot menu (only for my messages & not deleted) */}
+                                {isMe && !deleted && (
+                                  <div className="absolute top-2 right-2">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenMenuId((prev) =>
+                                          prev === m._id ? null : m._id
+                                        );
+                                      }}
+                                      className="rounded-lg px-2 py-1 text-sm opacity-90 hover:bg-white/10"
+                                      title="More"
+                                    >
+                                      ⋮
+                                    </button>
+
+                                    {openMenuId === m._id && (
+                                      <div
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="absolute right-0 mt-2 z-20 w-36 overflow-hidden rounded-xl border bg-white shadow-lg"
+                                      >
+                                        <button
+                                          onClick={() => {
+                                            setOpenMenuId(null);
+                                            startEdit(m);
+                                          }}
+                                          className="w-full px-4 py-2 text-left text-sm hover:bg-slate-50"
+                                        >
+                                          ✏️ Edit
+                                        </button>
+                                        <button
+                                          onClick={() => {
+                                            setOpenMenuId(null);
+                                            deleteForEveryone(m._id);
+                                          }}
+                                          className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+                                        >
+                                          🗑 Delete
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
                                 {deleted ? (
                                   <div className="text-sm italic opacity-90">
                                     This message was deleted
@@ -588,7 +627,7 @@ export default function ChatPage() {
                                 ) : (
                                   <>
                                     {m.text && (
-                                      <div className="whitespace-pre-wrap text-sm">
+                                      <div className="whitespace-pre-wrap text-sm pr-6">
                                         {m.text}
                                       </div>
                                     )}
@@ -653,23 +692,6 @@ export default function ChatPage() {
                                   ) : null}
                                   <span>{formatTime(m.createdAt)}</span>
                                 </div>
-
-                                {isMe && !deleted && (
-                                  <div className="mt-2 flex gap-2 justify-end">
-                                    <button
-                                      onClick={() => startEdit(m)}
-                                      className="rounded-lg border bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                                    >
-                                      ✏️
-                                    </button>
-                                    <button
-                                      onClick={() => deleteForEveryone(m._id)}
-                                      className="rounded-lg border bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                                    >
-                                      🗑
-                                    </button>
-                                  </div>
-                                )}
                               </div>
                             </div>
                           );
