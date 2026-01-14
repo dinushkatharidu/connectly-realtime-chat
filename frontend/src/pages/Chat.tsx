@@ -545,7 +545,7 @@ export default function ChatPage() {
                                             ].join(" ")}
                                           >
                                             <span>📄</span>
-                                            <span className="truncate max-w-[220px]">
+                                            <span className="truncate max-w-55">
                                               {a.name}
                                             </span>
                                             <span className="text-xs opacity-70">

@@ -1,13 +1,10 @@
-export type User = {
-  id: string;
-  name: string;
-  email: string;
-};
+// frontend/src/types.ts
 
-export type AuthUser = {
-  id: string;
+export type Attachment = {
+  url: string;
   name: string;
-  email: string;
+  type: string;
+  size: number;
 };
 
 export type UserLite = {
@@ -16,16 +13,21 @@ export type UserLite = {
   email: string;
 };
 
+export type Chat = {
+  _id: string;
+  members: UserLite[];
+  lastMessage?: {
+    text: string;
+  };
+};
+
 export type Message = {
   _id: string;
   chatId: string;
   senderId: string;
   text: string;
   createdAt: string;
-};
 
-export type Chat = {
-  _id: string;
-  members: UserLite[];
-  lastMessage?: Message;
+  // ✅ NEW: for files/photos
+  attachments?: Attachment[];
 };
