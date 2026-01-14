@@ -15,12 +15,12 @@ const messageSchema = new Schema(
     chatId: { type: Schema.Types.ObjectId, ref: "Chat", required: true },
     senderId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     text: { type: String, default: "" },
-
-    // ✅ NEW
     attachments: { type: [attachmentSchema], default: [] },
 
-    // optional seenBy (if you have it, keep it)
-    seenBy: { type: [Schema.Types.ObjectId], ref: "User", default: [] },
+    // ✅ WhatsApp-like states
+    editedAt: { type: Date, default: null },
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
