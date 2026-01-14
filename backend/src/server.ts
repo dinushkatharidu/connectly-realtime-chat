@@ -7,29 +7,30 @@ import http from "http";
 import { Server } from "socket.io";
 
 import uploadRoutes from "./routes/upload.routes";
-import chatRoutes from "./routes/chat.routes"; // your existing chat routes
-import authRoutes from "./routes/auth.routes"; // your existing auth routes
-import userRoutes from "./routes/user.routes"; // your existing user routes
+import chatRoutes from "./routes/chat.routes";
+import authRoutes from "./routes/auth.routes";
+import userRoutes from "./routes/user.routes";
+import messageRoutes from "./routes/message.routes";
 
-import { setupSocket } from "./config/socket"; // your socket setup
+import { setupSocket } from "./config/socket";
 
 dotenv.config();
 
-const app = express(); // ✅ app declared FIRST
+const app = express();
 
 app.use(cors({ origin: "http://localhost:5173", credentials: true }));
 app.use(express.json());
 
-// ✅ serve uploaded files
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
-// ✅ routes
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/chats", chatRoutes);
 app.use("/api/upload", uploadRoutes);
 
-// ✅ create http server + socket
+// ✅ new
+app.use("/api/messages", messageRoutes);
+
 const server = http.createServer(app);
 
 export const io = new Server(server, {
@@ -38,7 +39,6 @@ export const io = new Server(server, {
 
 setupSocket(io);
 
-// ✅ connect DB + start server
 const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI as string;
 
