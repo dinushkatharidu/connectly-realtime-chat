@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../context/AuthContext";
 import { createSocket } from "../socket";
-import type { Chat, Message, UserLite } from "../types";
+import type { Attachment, Chat, Message, UserLite } from "../types";
 
 function formatTime(iso: string) {
   const d = new Date(iso);
@@ -22,6 +22,16 @@ function dayLabel(iso: string) {
     month: "short",
     day: "numeric",
   });
+}
+
+function bytesToSize(bytes: number) {
+  if (!bytes) return "";
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    sizes.length - 1
+  );
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
 }
 
 export default function ChatPage() {
@@ -45,6 +55,10 @@ export default function ChatPage() {
   const typingTimeoutRef = useRef<number | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  // ✅ file upload states
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const socket = useMemo(() => {
     if (!token) return null;
@@ -70,20 +84,44 @@ export default function ChatPage() {
     setMessages(res.data);
   }, []);
 
+  // ✅ upload helper
+  const uploadSingle = useCallback(async (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+
+    const res = await api.post<Attachment>("/api/upload/single", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+
+    return res.data;
+  }, []);
+
+  // ✅ send message (text + attachment)
   const sendMessage = useCallback(async () => {
-    if (!activeChatId || !text.trim()) return;
+    if (!activeChatId) return;
+    if (!text.trim() && !selectedFile) return;
 
     try {
+      let attachments: Attachment[] = [];
+
+      if (selectedFile) {
+        setUploading(true);
+        const uploaded = await uploadSingle(selectedFile);
+        attachments = [uploaded];
+        setSelectedFile(null);
+        setUploading(false);
+      }
+
       const res = await api.post<Message>("/api/chats/message", {
         chatId: activeChatId,
         text: text.trim(),
+        attachments,
       });
 
-      // ✅ append immediately, but dedupe by _id
+      // ✅ optimistic add + dedupe
       setMessages((prev) => {
         const exists = prev.some((m) => m._id === res.data._id);
-        if (exists) return prev;
-        return [...prev, res.data];
+        return exists ? prev : [...prev, res.data];
       });
 
       setText("");
@@ -91,8 +129,9 @@ export default function ChatPage() {
       socket?.emit("typing", { chatId: activeChatId, isTyping: false });
     } catch (e) {
       console.error("sendMessage failed", e);
+      setUploading(false);
     }
-  }, [activeChatId, text, refreshChats, socket]);
+  }, [activeChatId, text, selectedFile, uploadSingle, refreshChats, socket]);
 
   const searchUsers = useCallback(async () => {
     setSearchError(null);
@@ -135,7 +174,7 @@ export default function ChatPage() {
     [refreshChats, loadMessages, socket]
   );
 
-  // Initial load
+  // initial load
   useEffect(() => {
     let alive = true;
 
@@ -156,7 +195,7 @@ export default function ChatPage() {
     };
   }, []);
 
-  // On active chat change
+  // on active chat change
   useEffect(() => {
     if (!activeChatId) return;
 
@@ -179,7 +218,7 @@ export default function ChatPage() {
     };
   }, [activeChatId, loadMessages, socket]);
 
-  // Socket listeners (no disconnect here)
+  // socket listeners
   useEffect(() => {
     if (!socket) return;
 
@@ -218,11 +257,12 @@ export default function ChatPage() {
     };
   }, [socket, activeChatId, refreshChats, user?.id]);
 
-  // Scroll to bottom
+  // scroll to bottom on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // typing debounce
   const handleTextChange = useCallback(
     (v: string) => {
       setText(v);
@@ -244,7 +284,7 @@ export default function ChatPage() {
   const partner = activeChat ? getPartner(activeChat) : null;
   const partnerOnline = partner ? onlineIds.has(partner._id) : false;
 
-  // Group messages by date
+  // group by date
   const grouped: Array<{ label: string; items: Message[] }> = [];
   for (const m of messages) {
     const label = dayLabel(m.createdAt);
@@ -255,10 +295,9 @@ export default function ChatPage() {
 
   return (
     <div className="h-full bg-slate-100 overflow-hidden">
-      {/* ✅ this wrapper prevents body scrolling */}
       <div className="mx-auto h-full max-w-6xl p-3 md:p-4">
         <div className="h-full overflow-hidden rounded-2xl bg-white shadow-lg flex flex-col">
-          {/* ✅ top bar stays visible */}
+          {/* top bar */}
           <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
             <div className="flex items-center gap-3 min-w-0">
               <div className="grid h-10 w-10 place-items-center rounded-full bg-emerald-600 text-white font-semibold">
@@ -282,9 +321,9 @@ export default function ChatPage() {
             </button>
           </div>
 
-          {/* ✅ grid must be min-h-0 so inner scroll works */}
+          {/* main */}
           <div className="grid grid-cols-12 flex-1 min-h-0">
-            {/* Sidebar (flex column + scroll list) */}
+            {/* sidebar */}
             <div className="col-span-12 border-r md:col-span-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between px-4 py-3 shrink-0">
                 <div className="text-sm font-semibold text-slate-900">
@@ -359,8 +398,7 @@ export default function ChatPage() {
                   )}
                 </div>
               )}
-                            
-              {/* ✅ scrollable chat list */}
+
               <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-3">
                 {chats.length === 0 && (
                   <div className="px-4 py-8 text-sm text-slate-500">
@@ -418,9 +456,8 @@ export default function ChatPage() {
               </div>
             </div>
 
-            {/* Chat window (flex + scroll messages) */}
+            {/* chat area */}
             <div className="col-span-12 md:col-span-8 flex flex-col min-h-0">
-              {/* header */}
               <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="grid h-10 w-10 place-items-center rounded-full bg-slate-200 text-slate-700 font-semibold">
@@ -438,7 +475,7 @@ export default function ChatPage() {
                 </div>
               </div>
 
-              {/* ✅ scrollable messages */}
+              {/* messages */}
               <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 p-4">
                 {!activeChatId ? (
                   <div className="grid h-full place-items-center text-slate-500">
@@ -471,9 +508,55 @@ export default function ChatPage() {
                                       : "bg-white text-slate-900 rounded-bl-md",
                                   ].join(" ")}
                                 >
-                                  <div className="whitespace-pre-wrap text-sm">
-                                    {m.text}
-                                  </div>
+                                  {m.text && (
+                                    <div className="whitespace-pre-wrap text-sm">
+                                      {m.text}
+                                    </div>
+                                  )}
+
+                                  {/* attachments */}
+                                  {m.attachments?.map((a) => {
+                                    const fullUrl = `http://localhost:5000${a.url}`;
+                                    const isImage = a.type.startsWith("image/");
+                                    return (
+                                      <div key={a.url} className="mt-2">
+                                        {isImage ? (
+                                          <a
+                                            href={fullUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                          >
+                                            <img
+                                              src={fullUrl}
+                                              alt={a.name}
+                                              className="max-h-56 rounded-xl border"
+                                            />
+                                          </a>
+                                        ) : (
+                                          <a
+                                            href={fullUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className={[
+                                              "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm",
+                                              isMe
+                                                ? "border-emerald-200 bg-emerald-700/20 text-emerald-50"
+                                                : "border-slate-200 bg-slate-50 text-slate-700",
+                                            ].join(" ")}
+                                          >
+                                            <span>📄</span>
+                                            <span className="truncate max-w-[220px]">
+                                              {a.name}
+                                            </span>
+                                            <span className="text-xs opacity-70">
+                                              {bytesToSize(a.size)}
+                                            </span>
+                                          </a>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+
                                   <div
                                     className={[
                                       "mt-1 text-right text-[11px]",
@@ -496,13 +579,30 @@ export default function ChatPage() {
                 )}
               </div>
 
-              {/* composer */}
+              {/* composer (📎 is here) */}
               <div className="border-t bg-white p-3 shrink-0">
                 <div className="flex items-center gap-2">
                   <input
+                    type="file"
+                    id="filePicker"
+                    className="hidden"
+                    onChange={(e) =>
+                      setSelectedFile(e.target.files?.[0] ?? null)
+                    }
+                  />
+
+                  <label
+                    htmlFor="filePicker"
+                    className="cursor-pointer rounded-xl border px-3 py-3 text-sm hover:bg-slate-50 select-none"
+                    title="Attach file"
+                  >
+                    📎
+                  </label>
+
+                  <input
                     value={text}
                     onChange={(e) => handleTextChange(e.target.value)}
-                    disabled={!activeChatId}
+                    disabled={!activeChatId || uploading}
                     placeholder={
                       activeChatId ? "Type a message…" : "Select a chat first"
                     }
@@ -511,22 +611,37 @@ export default function ChatPage() {
                       if (e.key === "Enter") sendMessage();
                     }}
                   />
+
                   <button
                     onClick={() => sendMessage()}
-                    disabled={!activeChatId || !text.trim()}
+                    disabled={
+                      !activeChatId ||
+                      uploading ||
+                      (!text.trim() && !selectedFile)
+                    }
                     className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
                   >
-                    Send
+                    {uploading ? "Uploading..." : "Send"}
                   </button>
                 </div>
 
-                <div className="mt-2 text-xs text-slate-400">
-                  Press <b>Enter</b> to send
-                </div>
+                {selectedFile && (
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2">
+                    <div className="min-w-0 text-xs text-slate-600 truncate">
+                      Attached: <b>{selectedFile.name}</b>
+                    </div>
+                    <button
+                      onClick={() => setSelectedFile(null)}
+                      className="text-xs font-semibold text-red-600 hover:underline"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
-          {/* end grid */}
+          {/* end main */}
         </div>
       </div>
     </div>
