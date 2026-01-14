@@ -42,8 +42,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState<string>("");
 
-  const [onlineIds, setOnlineIds] = useState<Set<string>>(() => new Set());
-
+  
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchEmail, setSearchEmail] = useState("");
   const [searchResults, setSearchResults] = useState<UserLite[]>([]);
@@ -58,6 +57,9 @@ export default function ChatPage() {
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState<string>("");
 
   const socket = useMemo(() => {
     if (!token) return null;
@@ -75,8 +77,7 @@ export default function ChatPage() {
   const refreshChats = useCallback(async () => {
     const res = await api.get<Chat[]>("/api/chats");
     setChats(res.data);
-    if (!activeChatId && res.data.length > 0) setActiveChatId(res.data[0]._id);
-  }, [activeChatId]);
+  }, []);
 
   const loadMessages = useCallback(async (chatId: string) => {
     const res = await api.get<Message[]>(`/api/chats/${chatId}/messages`);
@@ -93,6 +94,29 @@ export default function ChatPage() {
 
     return res.data;
   }, []);
+
+  // ✅ ONLY load messages here (user action). No loadMessages inside useEffect.
+  const handleSelectChat = useCallback(
+    async (chatId: string) => {
+      if (!chatId) return;
+
+      // leave prev
+      if (socket && activeChatId) socket.emit("leave_chat", activeChatId);
+
+      // reset UI
+      setTypingUserIds(new Set());
+      setEditingId(null);
+      setEditingText("");
+      setSelectedFile(null);
+
+      // set chat + join room + load messages
+      setActiveChatId(chatId);
+      socket?.emit("join_chat", chatId);
+
+      await loadMessages(chatId);
+    },
+    [socket, activeChatId, loadMessages]
+  );
 
   const sendMessage = useCallback(async () => {
     if (!activeChatId) return;
@@ -129,23 +153,73 @@ export default function ChatPage() {
     }
   }, [activeChatId, text, selectedFile, uploadSingle, refreshChats, socket]);
 
-  // ✅ delete message
-  const deleteMessage = useCallback(
-    async (messageId: string) => {
-      if (!confirm("Delete this message?")) return;
+  const startEdit = useCallback((m: Message) => {
+    setEditingId(m._id);
+    setEditingText(m.text || "");
+  }, []);
 
-      // optimistic remove
-      setMessages((prev) => prev.filter((m) => m._id !== messageId));
+  const saveEdit = useCallback(async () => {
+    if (!editingId) return;
+    const newText = editingText.trim();
+    if (!newText) return;
+
+    const nowIso = new Date().toISOString();
+
+    // optimistic
+    setMessages((prev) =>
+      prev.map((m) =>
+        m._id === editingId ? { ...m, text: newText, editedAt: nowIso } : m
+      )
+    );
+
+    try {
+      await api.patch(`/api/messages/${editingId}`, { text: newText });
+      setEditingId(null);
+      setEditingText("");
+      refreshChats().catch(() => {});
+    } catch (e) {
+      console.error("edit failed", e);
+      // reload only if edit fails
+      if (activeChatId) loadMessages(activeChatId).catch(() => {});
+    }
+  }, [editingId, editingText, activeChatId, loadMessages, refreshChats]);
+
+  const cancelEdit = useCallback(() => {
+    setEditingId(null);
+    setEditingText("");
+  }, []);
+
+  const deleteForEveryone = useCallback(
+    async (messageId: string) => {
+      if (!confirm("Delete this message for everyone?")) return;
+
+      const nowIso = new Date().toISOString();
+
+      // optimistic
+      setMessages((prev) =>
+        prev.map((m) =>
+          m._id === messageId
+            ? {
+                ...m,
+                isDeleted: true,
+                deletedAt: nowIso,
+                editedAt: null,
+                text: "",
+                attachments: [],
+              }
+            : m
+        )
+      );
 
       try {
         await api.delete(`/api/messages/${messageId}`);
+        refreshChats().catch(() => {});
       } catch (e) {
         console.error("delete failed", e);
-        // reload messages if delete failed
         if (activeChatId) loadMessages(activeChatId).catch(() => {});
       }
     },
-    [activeChatId, loadMessages]
+    [activeChatId, loadMessages, refreshChats]
   );
 
   const searchUsers = useCallback(async () => {
@@ -175,81 +249,108 @@ export default function ChatPage() {
       const newChat = res.data;
 
       await refreshChats();
-      setActiveChatId(newChat._id);
-      await loadMessages(newChat._id);
-
-      socket?.emit("join_chat", newChat._id);
-      socket?.emit("chat:seen", { chatId: newChat._id });
+      await handleSelectChat(newChat._id);
 
       setSearchEmail("");
       setSearchResults([]);
       setSearchError(null);
       setSearchOpen(false);
     },
-    [refreshChats, loadMessages, socket]
+    [refreshChats, handleSelectChat]
   );
 
+  // initial load
   useEffect(() => {
     let alive = true;
-
-    async function init() {
+    (async () => {
       try {
         const res = await api.get<Chat[]>("/api/chats");
         if (!alive) return;
         setChats(res.data);
-        if (res.data.length > 0) setActiveChatId(res.data[0]._id);
+
+        // auto open first chat ONLY ONCE (user action simulation)
+        if (res.data.length > 0) {
+          const first = res.data[0]._id;
+          setActiveChatId(first);
+          socket?.emit("join_chat", first);
+          await loadMessages(first);
+        }
       } catch (e) {
         console.error(e);
       }
-    }
-
-    init();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!activeChatId) return;
-
-    let alive = true;
-
-    async function onChatChange() {
-      if (!alive) return;
-
-      setTypingUserIds(new Set());
-      await loadMessages(activeChatId);
-
-      socket?.emit("join_chat", activeChatId);
-      socket?.emit("chat:seen", { chatId: activeChatId });
-    }
-
-    onChatChange();
+    })();
 
     return () => {
       alive = false;
     };
-  }, [activeChatId, loadMessages, socket]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // keep this as one-time init
 
+  // socket listeners (NO loadMessages here!)
   useEffect(() => {
     if (!socket) return;
 
-    const onPresence = (ids: string[]) => setOnlineIds(new Set(ids));
-
     const onNewMessage = (msg: Message) => {
-      if (msg.chatId === activeChatId) {
-        setMessages((prev) => {
-          const exists = prev.some((m) => m._id === msg._id);
-          if (exists) return prev;
-          return [...prev, msg];
-        });
-        socket.emit("chat:seen", { chatId: activeChatId });
+      if (msg.chatId !== activeChatId) {
+        refreshChats().catch(() => {});
+        return;
       }
+      setMessages((prev) => {
+        const exists = prev.some((m) => m._id === msg._id);
+        return exists ? prev : [...prev, msg];
+      });
       refreshChats().catch(() => {});
     };
 
-    const onTyping = (data: { userId: string; isTyping: boolean }) => {
+    const onMessageUpdated = (data: {
+      chatId: string;
+      messageId: string;
+      text: string;
+      editedAt: string | null;
+    }) => {
+      if (data.chatId !== activeChatId) return;
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m._id === data.messageId
+            ? { ...m, text: data.text, editedAt: data.editedAt }
+            : m
+        )
+      );
+    };
+
+    const onMessageDeleted = (data: {
+      chatId: string;
+      messageId: string;
+      isDeleted: boolean;
+      deletedAt: string | null;
+    }) => {
+      if (data.chatId !== activeChatId) return;
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m._id === data.messageId
+            ? {
+                ...m,
+                isDeleted: true,
+                deletedAt: data.deletedAt,
+                editedAt: null,
+                text: "",
+                attachments: [],
+              }
+            : m
+        )
+      );
+    };
+
+    const onTyping = (data: {
+      userId: string;
+      isTyping: boolean;
+      chatId?: string;
+    }) => {
+      // if server doesn't send chatId, ignore
       if (data.userId === user?.id) return;
+
       setTypingUserIds((prev) => {
         const next = new Set(prev);
         if (data.isTyping) next.add(data.userId);
@@ -258,22 +359,16 @@ export default function ChatPage() {
       });
     };
 
-    // ✅ handle delete event from other user
-    const onMessageDeleted = (data: { chatId: string; messageId: string }) => {
-      if (data.chatId !== activeChatId) return;
-      setMessages((prev) => prev.filter((m) => m._id !== data.messageId));
-    };
-
-    socket.on("presence:list", onPresence);
     socket.on("new_message", onNewMessage);
-    socket.on("typing", onTyping);
+    socket.on("message_updated", onMessageUpdated);
     socket.on("message_deleted", onMessageDeleted);
+    socket.on("typing", onTyping);
 
     return () => {
-      socket.off("presence:list", onPresence);
       socket.off("new_message", onNewMessage);
-      socket.off("typing", onTyping);
+      socket.off("message_updated", onMessageUpdated);
       socket.off("message_deleted", onMessageDeleted);
+      socket.off("typing", onTyping);
     };
   }, [socket, activeChatId, refreshChats, user?.id]);
 
@@ -284,11 +379,9 @@ export default function ChatPage() {
   const handleTextChange = useCallback(
     (v: string) => {
       setText(v);
-
       if (!socket || !activeChatId) return;
 
       socket.emit("typing", { chatId: activeChatId, isTyping: true });
-
       if (typingTimeoutRef.current)
         window.clearTimeout(typingTimeoutRef.current);
       typingTimeoutRef.current = window.setTimeout(() => {
@@ -300,7 +393,6 @@ export default function ChatPage() {
 
   const activeChat = chats.find((c) => c._id === activeChatId);
   const partner = activeChat ? getPartner(activeChat) : null;
-  const partnerOnline = partner ? onlineIds.has(partner._id) : false;
 
   const grouped: Array<{ label: string; items: Message[] }> = [];
   for (const m of messages) {
@@ -417,12 +509,11 @@ export default function ChatPage() {
                 {chats.map((chat) => {
                   const p = getPartner(chat);
                   const selected = chat._id === activeChatId;
-                  const isOnline = p ? onlineIds.has(p._id) : false;
 
                   return (
                     <button
                       key={chat._id}
-                      onClick={() => setActiveChatId(chat._id)}
+                      onClick={() => handleSelectChat(chat._id)}
                       className={[
                         "mb-2 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left hover:bg-slate-50",
                         selected
@@ -430,26 +521,13 @@ export default function ChatPage() {
                           : "bg-white",
                       ].join(" ")}
                     >
-                      <div className="relative">
-                        <div className="grid h-11 w-11 place-items-center rounded-full bg-slate-200 text-slate-700 font-semibold">
-                          {(p?.name?.[0] || "?").toUpperCase()}
-                        </div>
-                        <span
-                          className={[
-                            "absolute bottom-0 right-0 h-3 w-3 rounded-full ring-2 ring-white",
-                            isOnline ? "bg-emerald-500" : "bg-slate-400",
-                          ].join(" ")}
-                        />
+                      <div className="grid h-11 w-11 place-items-center rounded-full bg-slate-200 text-slate-700 font-semibold">
+                        {(p?.name?.[0] || "?").toUpperCase()}
                       </div>
 
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="truncate font-semibold text-slate-900">
-                            {p?.name || "Unknown"}
-                          </div>
-                          <div className="text-xs text-slate-500">
-                            {isOnline ? "Online" : "Offline"}
-                          </div>
+                        <div className="truncate font-semibold text-slate-900">
+                          {p?.name || "Unknown"}
                         </div>
                         <div className="truncate text-xs text-slate-500">
                           {p?.email || ""}
@@ -466,19 +544,11 @@ export default function ChatPage() {
 
             <div className="col-span-12 md:col-span-8 flex flex-col min-h-0">
               <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="grid h-10 w-10 place-items-center rounded-full bg-slate-200 text-slate-700 font-semibold">
-                    {(partner?.name?.[0] || "C").toUpperCase()}
-                  </div>
-                  <div className="leading-tight min-w-0">
-                    <div className="font-semibold text-slate-900 truncate">
-                      {partner ? partner.name : "Select a chat"}
-                    </div>
-                    <div className="text-xs text-slate-500 truncate">
-                      {partner ? (partnerOnline ? "Online" : "Offline") : "—"}
-                      {typingUserIds.size > 0 ? " • typing…" : ""}
-                    </div>
-                  </div>
+                <div className="font-semibold text-slate-900 truncate">
+                  {partner ? partner.name : "Select a chat"}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {typingUserIds.size > 0 ? "typing…" : ""}
                 </div>
               </div>
 
@@ -493,6 +563,8 @@ export default function ChatPage() {
                       <div className="space-y-2">
                         {g.items.map((m) => {
                           const isMe = m.senderId === user?.id;
+                          const deleted = !!m.isDeleted;
+
                           return (
                             <div
                               key={m._id}
@@ -501,84 +573,102 @@ export default function ChatPage() {
                                 isMe ? "justify-end" : "justify-start",
                               ].join(" ")}
                             >
-                              <div className="flex items-start gap-2">
+                              <div
+                                className={[
+                                  "max-w-[78%] rounded-2xl px-4 py-2 shadow-sm",
+                                  isMe
+                                    ? "bg-emerald-600 text-white rounded-br-md"
+                                    : "bg-white text-slate-900 rounded-bl-md",
+                                ].join(" ")}
+                              >
+                                {deleted ? (
+                                  <div className="text-sm italic opacity-90">
+                                    This message was deleted
+                                  </div>
+                                ) : (
+                                  <>
+                                    {m.text && (
+                                      <div className="whitespace-pre-wrap text-sm">
+                                        {m.text}
+                                      </div>
+                                    )}
+
+                                    {m.attachments?.map((a) => {
+                                      const fullUrl = `http://localhost:5000${a.url}`;
+                                      const isImage =
+                                        a.type.startsWith("image/");
+                                      return (
+                                        <div key={a.url} className="mt-2">
+                                          {isImage ? (
+                                            <a
+                                              href={fullUrl}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                            >
+                                              <img
+                                                src={fullUrl}
+                                                alt={a.name}
+                                                className="max-h-56 rounded-xl border"
+                                              />
+                                            </a>
+                                          ) : (
+                                            <a
+                                              href={fullUrl}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className={[
+                                                "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm",
+                                                isMe
+                                                  ? "border-emerald-200 bg-emerald-700/20 text-emerald-50"
+                                                  : "border-slate-200 bg-slate-50 text-slate-700",
+                                              ].join(" ")}
+                                            >
+                                              <span>📄</span>
+                                              <span className="truncate max-w-55">
+                                                {a.name}
+                                              </span>
+                                              <span className="text-xs opacity-70">
+                                                {bytesToSize(a.size)}
+                                              </span>
+                                            </a>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </>
+                                )}
+
                                 <div
                                   className={[
-                                    "max-w-[78%] rounded-2xl px-4 py-2 shadow-sm",
+                                    "mt-1 flex items-center justify-end gap-2 text-[11px]",
                                     isMe
-                                      ? "bg-emerald-600 text-white rounded-br-md"
-                                      : "bg-white text-slate-900 rounded-bl-md",
+                                      ? "text-emerald-100"
+                                      : "text-slate-400",
                                   ].join(" ")}
                                 >
-                                  {m.text && (
-                                    <div className="whitespace-pre-wrap text-sm">
-                                      {m.text}
-                                    </div>
-                                  )}
-
-                                  {m.attachments?.map((a) => {
-                                    const fullUrl = `http://localhost:5000${a.url}`;
-                                    const isImage = a.type.startsWith("image/");
-                                    return (
-                                      <div key={a.url} className="mt-2">
-                                        {isImage ? (
-                                          <a
-                                            href={fullUrl}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                          >
-                                            <img
-                                              src={fullUrl}
-                                              alt={a.name}
-                                              className="max-h-56 rounded-xl border"
-                                            />
-                                          </a>
-                                        ) : (
-                                          <a
-                                            href={fullUrl}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            className={[
-                                              "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm",
-                                              isMe
-                                                ? "border-emerald-200 bg-emerald-700/20 text-emerald-50"
-                                                : "border-slate-200 bg-slate-50 text-slate-700",
-                                            ].join(" ")}
-                                          >
-                                            <span>📄</span>
-                                            <span className="truncate max-w-55">
-                                              {a.name}
-                                            </span>
-                                            <span className="text-xs opacity-70">
-                                              {bytesToSize(a.size)}
-                                            </span>
-                                          </a>
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-
-                                  <div
-                                    className={[
-                                      "mt-1 text-right text-[11px]",
-                                      isMe
-                                        ? "text-emerald-100"
-                                        : "text-slate-400",
-                                    ].join(" ")}
-                                  >
-                                    {formatTime(m.createdAt)}
-                                  </div>
+                                  {!deleted && m.editedAt ? (
+                                    <span className="italic opacity-90">
+                                      (edited)
+                                    </span>
+                                  ) : null}
+                                  <span>{formatTime(m.createdAt)}</span>
                                 </div>
 
-                                {/* ✅ delete button for my messages */}
-                                {isMe && (
-                                  <button
-                                    onClick={() => deleteMessage(m._id)}
-                                    className="mt-2 rounded-lg border bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                                    title="Delete message"
-                                  >
-                                    🗑
-                                  </button>
+                                {isMe && !deleted && (
+                                  <div className="mt-2 flex gap-2 justify-end">
+                                    <button
+                                      onClick={() => startEdit(m)}
+                                      className="rounded-lg border bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                                    >
+                                      ✏️
+                                    </button>
+                                    <button
+                                      onClick={() => deleteForEveryone(m._id)}
+                                      className="rounded-lg border bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                                    >
+                                      🗑
+                                    </button>
+                                  </div>
                                 )}
                               </div>
                             </div>
@@ -590,6 +680,37 @@ export default function ChatPage() {
                   <div ref={bottomRef} />
                 </div>
               </div>
+
+              {editingId && (
+                <div className="border-t bg-amber-50 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-amber-700">
+                      Editing:
+                    </span>
+                    <input
+                      value={editingText}
+                      onChange={(e) => setEditingText(e.target.value)}
+                      className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-amber-500"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveEdit();
+                        if (e.key === "Escape") cancelEdit();
+                      }}
+                    />
+                    <button
+                      onClick={saveEdit}
+                      className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white hover:bg-amber-700"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={cancelEdit}
+                      className="rounded-lg border px-3 py-2 text-sm hover:bg-white"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div className="border-t bg-white p-3 shrink-0">
                 <div className="flex items-center gap-2">
@@ -613,9 +734,13 @@ export default function ChatPage() {
                   <input
                     value={text}
                     onChange={(e) => handleTextChange(e.target.value)}
-                    disabled={!activeChatId || uploading}
+                    disabled={!activeChatId || uploading || !!editingId}
                     placeholder={
-                      activeChatId ? "Type a message…" : "Select a chat first"
+                      editingId
+                        ? "Finish editing first…"
+                        : activeChatId
+                        ? "Type a message…"
+                        : "Select a chat first"
                     }
                     className="w-full rounded-xl border px-4 py-3 text-sm outline-none focus:border-emerald-500 disabled:bg-slate-100"
                     onKeyDown={(e) => {
@@ -628,6 +753,7 @@ export default function ChatPage() {
                     disabled={
                       !activeChatId ||
                       uploading ||
+                      !!editingId ||
                       (!text.trim() && !selectedFile)
                     }
                     className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
@@ -652,7 +778,6 @@ export default function ChatPage() {
               </div>
             </div>
           </div>
-          {/* end main */}
         </div>
       </div>
     </div>

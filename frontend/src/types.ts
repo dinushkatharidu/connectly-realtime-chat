@@ -1,5 +1,3 @@
-// frontend/src/types.ts
-
 export type Attachment = {
   url: string;
   name: string;
@@ -16,9 +14,7 @@ export type UserLite = {
 export type Chat = {
   _id: string;
   members: UserLite[];
-  lastMessage?: {
-    text: string;
-  };
+  lastMessage?: { text: string };
 };
 
 export type Message = {
@@ -28,6 +24,10 @@ export type Message = {
   text: string;
   createdAt: string;
 
-  // ✅ NEW: for files/photos
   attachments?: Attachment[];
+
+  // ✅ WhatsApp-like
+  editedAt?: string | null;
+  isDeleted?: boolean;
+  deletedAt?: string | null;
 };
